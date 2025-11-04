@@ -181,16 +181,6 @@ def visualize_transfer_network(G, title="Layer 1: Transfer Network"):
     plt.tight_layout()
     return plt
 
-
-
-# ============================================================================
-# CREATE VISUALIZATIONS
-# ============================================================================
-
-# Assuming networks from Part 2 are available: G_transfer, G_referral, G_integrated
-
-print("Creating visualizations...")
-
 # Layer 1: Transfer Network
 visualize_transfer_network(G_transfer)
 plt.savefig('layer1_transfer_network.png', dpi=300, bbox_inches='tight')

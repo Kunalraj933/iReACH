@@ -11,7 +11,7 @@ from sklearn.model_selection import GroupShuffleSplit
 # Needs replacing with real HES data
 np.random.seed(42)
 pat = 200
-hosp = 10 
+hosp = 10
 pat_ids = np.repeat(np.arange(pat), hosp)
 hosp_ids = np.tile(np.arange(hosp), pat)
 
@@ -45,6 +45,9 @@ def closest_hosp(df, n_closest=3):
     return pd.concat(f_data, ignore_index=True)
 df_f = closest_hosp(df, n_closest=3)
 
+print("Filtered data with 3 closest hospitals per patient:")
+print(df_f.head(10))
+
 ############### Compute choices based on utility
 # Distance -0.3, wait_time -0.01, rating 0.1
 beta = np.array([-0.3, -0.01, 0.1])
@@ -68,7 +71,8 @@ for patient in df_f['pat_id'].unique():
 df_f['choice'] = choices
 
 # Print summary of sample data
-print(df_f.head(15))
+print("Sample data:")
+print(df_f.head())
 
 ############### Split into test and train 27/75%
 splitter = GroupShuffleSplit(test_size=0.25, n_splits=1, random_state=42)
@@ -85,3 +89,5 @@ model = ConditionalLogit(endog=df_train["choice"],
 
 results = model.fit()
 print(results.summary())
+
+

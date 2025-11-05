@@ -7,7 +7,7 @@ from sklearn.model_selection import GroupShuffleSplit
 
 
 
-############### Create fake hospital choice data with more hospitals
+############### Create simulated hospital choice data with more hospitals
 # Needs replacing with real HES data
 np.random.seed(42)
 pat = 200

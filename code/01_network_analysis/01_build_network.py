@@ -562,3 +562,4 @@ plt.show()
 visualize_integrated_network(G_integrated)
 plt.savefig('integrated_hie_network.png', dpi=300, bbox_inches='tight')
 plt.show()
+

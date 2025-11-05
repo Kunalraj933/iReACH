@@ -404,6 +404,8 @@ def analyze_centrality_metrics(G, network_name):
     
     return metrics_df
 
+metrics_df = analyze_centrality_metrics(G_transfer, "Transfer Network")
+
 def identify_vulnerability_hotspots(G, metrics_df, top_n=5):
     """
     Identify nodes that represent critical vulnerabilities
@@ -428,6 +430,10 @@ def identify_vulnerability_hotspots(G, metrics_df, top_n=5):
                        'In_Degree', 'Out_Degree']].to_string(index=False))
     
     return high_betweenness, high_degree
+
+high_betweenness, high_degree = identify_vulnerability_hotspots(G_transfer, metrics_df, top_n=5)
+
+print(high_betweenness, high_degree)
 
 def analyze_network_density(G, network_name):
     """

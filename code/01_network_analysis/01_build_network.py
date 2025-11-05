@@ -45,7 +45,7 @@ geo_hospital_coords = gpd.GeoDataFrame(hospital_coords,
 print(geo_hospital_coords)
 
 ############## Plot NWL LSOAs and hospitals
-ax = nwl_lsoa.plot(figsize=(10, 10), color='lightgrey',
+ax = nwl_lsoa.plot(figsize=(12, 8), color='lightgrey',
                     edgecolor='darkgrey', alpha=0.5)
 
 hospital_colors = {
@@ -389,18 +389,17 @@ visualize_transfer_network(G_transfer)
 plt.savefig('layer1_transfer_network.png', dpi=300, bbox_inches='tight')
 plt.show()
 
-
-############### Geographic Transfer Network on Map ###############
+############### Geographic Transfer Network on Map (NetworkX Version) ###############
 
 def plot_transfer_network_on_map(nwl_lsoa, geo_hospital_coords, G_transfer, hospital_colors):
     """Simple overlay of transfer network on LSOA map using NetworkX"""
-    fig, ax = plt.subplots(figsize=(16, 14))
+    fig, ax = plt.subplots(figsize=(12, 8))
     
     # 1. Plot LSOAs as base layer
     nwl_lsoa.plot(ax=ax, color='lightgrey', edgecolor='darkgrey', 
                   alpha=0.3, linewidth=0.5)
     
-    # 2. Create position dictionary for NetworkX (hospital coordinates)
+    # 2. Create position dictionary (hospital coordinates)
     pos = {}
     for idx, row in geo_hospital_coords.iterrows():
         hospital_name = row['hospital_name']
@@ -431,29 +430,20 @@ def plot_transfer_network_on_map(nwl_lsoa, geo_hospital_coords, G_transfer, hosp
     for node in G_transfer.nodes():
         # Size based on transfer volume
         transfers = weighted_in_degree.get(node, 0)
-        size = 300 + 1000 * (transfers / max_transfers) if max_transfers > 0 else 500
+        size = 50 + 200 * (transfers / max_transfers) if max_transfers > 0 else 100
         node_sizes.append(size)
         
         # Color from hospital_colors dictionary
         node_colors_list.append(hospital_colors.get(node, 'gray'))
     
-    # 6. Draw hospital nodes 
+    # 6. Draw hospital nodes using NetworkX
     nx.draw_networkx_nodes(G_transfer, pos,
                           node_color=node_colors_list,
                           node_size=node_sizes,
-                          edgecolors='black',
+                          edgecolors= None,
                           linewidths=2,
                           alpha=0.9,
                           ax=ax)
-    
-    # 7. Draw hospital labels
-    labels = {node: node.replace(' Hospital', '') for node in G_transfer.nodes()}
-    nx.draw_networkx_labels(G_transfer, pos,
-                           labels=labels,
-                           font_size=8,
-                           font_weight='bold',
-                           font_color='black',
-                           ax=ax)
     
     # 8. Create legend
     legend_patches = [mpatches.Patch(color=color, label=hospital) 
@@ -486,17 +476,46 @@ def plot_transfer_network_on_map(nwl_lsoa, geo_hospital_coords, G_transfer, hosp
 
 
 # Use the function
-print("\nCreating geographic transfer network...")
+print("\nCreating geographic transfer network with NetworkX...")
 fig, ax = plot_transfer_network_on_map(nwl_lsoa, geo_hospital_coords, G_transfer, hospital_colors)
 plt.savefig('nwl_map_with_network.png', dpi=300, bbox_inches='tight')
 plt.show()
 
 
 
+def visualize_referral_network(G, title="Layer 2: Referral Network"):
+    """Visualize the referral network"""
+    plt.figure(figsize=(12, 8))
+    
+    pos = nx.spring_layout(G, k=2, iterations=50, seed=42)
+    
+    # Node sizes based on in-degree (receiving referrals)
+    in_degrees = dict(G.in_degree())
+    max_in_degree = max(in_degrees.values()) if in_degrees else 1
+    node_sizes = [500 * in_degrees[node] / max_in_degree for node in G.nodes()]
+    
+    # Edge widths
+    edges = G.edges()
+    weights = [G[u][v]['weight'] for u, v in edges]
+    max_weight = max(weights) if weights else 1
+    edge_widths = [3 * w / max_weight for w in weights]
+    
+    # Draw network
+    nx.draw_networkx_nodes(G, pos, node_color='lightgreen', 
+                          node_size=node_sizes, alpha=0.9)
+    nx.draw_networkx_labels(G, pos, font_size=8, font_weight='bold')
+    nx.draw_networkx_edges(G, pos, width=edge_widths, alpha=0.5, 
+                          arrows=True, arrowsize=15, edge_color='green',
+                          connectionstyle='arc3,rad=0.1')
+    
+    plt.title(title, fontsize=16, fontweight='bold')
+    plt.axis('off')
+    plt.tight_layout()
+    return plt
 
 def visualize_integrated_network(G, title="Multi-Layered Integrated HIE Network"):
     """Visualize the integrated network with all layers"""
-    plt.figure(figsize=(16, 12))
+    plt.figure(figsize=(12, 8))
     
     # Layout
     pos = nx.spring_layout(G, k=3, iterations=50, seed=42)
@@ -508,7 +527,7 @@ def visualize_integrated_network(G, title="Multi-Layered Integrated HIE Network"
     # Ensure hospital_nodes is defined from the graph's nodes
     hospital_nodes = list(G.nodes())
 
-    hospital_sizes = [2000 * degrees[node] / max_degree for node in hospital_nodes]
+    hospital_sizes = [500 * degrees[node] / max_degree for node in hospital_nodes]
     
     # Draw nodes
     nx.draw_networkx_nodes(G, pos, nodelist=hospital_nodes, 

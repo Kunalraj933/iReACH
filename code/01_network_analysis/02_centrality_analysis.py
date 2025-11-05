@@ -461,3 +461,4 @@ def analyze_network_density(G, network_name):
     # Weakly connected components
     wcc = list(nx.weakly_connected_components(G) if nx.is_directed(G) 
                else nx.connected_components(G))
+    

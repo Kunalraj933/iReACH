@@ -4,8 +4,79 @@ import networkx as nx
 import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
 import seaborn as sns
+import pandas as pd
+import geopandas as gpd
+import numpy as np
+import shapely.geometry as geom
+import matplotlib.patches as mpatches
 
 np.random.seed(42)
+
+############### Read London LSOA shapefile
+lsoa = gpd.read_file("/Users/swethamavuru/Desktop/Kunal work/OPR-CAN/Coding/ESRI/LSOA_2011_London_gen_MHW.shp")
+
+############## Filter for NWL LSOAs
+nwl_boroughs = ['Brent','Ealing', 'Hammersmith and Fulham', 'Harrow', 'Hillingdon', 'Hounslow', 'Kensington and Chelsea','Westminster']
+nwl_lsoa = lsoa[lsoa['LAD11NM'].isin(nwl_boroughs)]
+print(nwl_lsoa.head())
+
+
+############## NWL Type 1 A&E Hospitals and their coordinates
+type_1_ED = ["Northwick Park Hospital", "Hillingdon Hospital", "Ealing Hospital", "Chelsea and Westminster Hospital", "Charing Cross Hospital", "West Middlesex University Hospital", "St Mary's Hospital"]
+hospital_coords = pd.DataFrame({'hospital_name': type_1_ED})
+
+hospitals = {
+    "Northwick Park Hospital": (51.57466, -0.32004), 
+    "Hillingdon Hospital": (51.52568, -0.46098),    
+    "Ealing Hospital": (51.50784, -0.34592),      
+    "Chelsea and Westminster Hospital": (51.48476, -0.18282), 
+    "Charing Cross Hospital": (51.48796, -0.22145),   
+    "West Middlesex University Hospital": (51.47401, -0.32428),  
+    "St Mary's Hospital": (51.51766, -0.17437)   
+}
+
+hospital_coords = pd.DataFrame.from_dict(hospitals, orient='index', columns=['latitude', 'longitude'])
+hospital_coords['hospital_name'] = hospital_coords.index
+
+geo_hospital_coords = gpd.GeoDataFrame(hospital_coords, 
+                       geometry=gpd.points_from_xy(hospital_coords['longitude'], hospital_coords['latitude']), 
+                       crs='EPSG:4326').to_crs('EPSG:27700')
+
+print(geo_hospital_coords)
+
+############## Plot NWL LSOAs and hospitals
+ax = nwl_lsoa.plot(figsize=(10, 10), color='lightgrey',
+                    edgecolor='darkgrey', alpha=0.5)
+
+hospital_colors = {
+    'Northwick Park Hospital': 'red',
+    'Hillingdon Hospital': 'blue', 
+    'Ealing Hospital': 'green',
+    'Chelsea and Westminster Hospital': 'orange',
+    'Charing Cross Hospital': 'purple',
+    'West Middlesex University Hospital': 'brown',
+    "St Mary's Hospital": 'pink'
+}
+
+for idx, row in geo_hospital_coords.iterrows():
+    color = hospital_colors[row['hospital_name']]
+    ax.scatter(row.geometry.x, row.geometry.y, 
+              color=color, s=100, 
+              edgecolor='black', linewidth=1, alpha=0.8)
+    
+legend_patches = [mpatches.Patch(color=color, label=hospital) 
+                 for hospital, color in hospital_colors.items()]
+ax.legend(handles=legend_patches, loc='center left', bbox_to_anchor=(1, 0.5))
+
+ax.set_title("North West London LSOAs and Type 1 A&E Hospitals", 
+             fontsize=14, fontweight='bold', pad=20)
+ax.set_xlabel("Longitude", fontsize=12)
+ax.set_ylabel("Latitude", fontsize=12)
+ax.grid(True, alpha=0.3, linestyle='--')
+plt.savefig('nwl_hospitals_map.jpg', dpi=300, bbox_inches='tight')
+plt.show()
+
+
 
 #############SYNTHETIC DATA GENERATION###############
 
@@ -319,36 +390,109 @@ plt.savefig('layer1_transfer_network.png', dpi=300, bbox_inches='tight')
 plt.show()
 
 
+############### Geographic Transfer Network on Map ###############
 
-def visualize_referral_network(G, title="Layer 2: Referral Network"):
-    """Visualize the referral network"""
-    plt.figure(figsize=(14, 10))
+def plot_transfer_network_on_map(nwl_lsoa, geo_hospital_coords, G_transfer, hospital_colors):
+    """Simple overlay of transfer network on LSOA map using NetworkX"""
+    fig, ax = plt.subplots(figsize=(16, 14))
     
-    pos = nx.spring_layout(G, k=2, iterations=50, seed=42)
+    # 1. Plot LSOAs as base layer
+    nwl_lsoa.plot(ax=ax, color='lightgrey', edgecolor='darkgrey', 
+                  alpha=0.3, linewidth=0.5)
     
-    # Node sizes based on in-degree (receiving referrals)
-    in_degrees = dict(G.in_degree())
-    max_in_degree = max(in_degrees.values()) if in_degrees else 1
-    node_sizes = [3000 * in_degrees[node] / max_in_degree for node in G.nodes()]
+    # 2. Create position dictionary for NetworkX (hospital coordinates)
+    pos = {}
+    for idx, row in geo_hospital_coords.iterrows():
+        hospital_name = row['hospital_name']
+        pos[hospital_name] = (row.geometry.x, row.geometry.y)
     
-    # Edge widths
-    edges = G.edges()
-    weights = [G[u][v]['weight'] for u, v in edges]
+    # 3. Calculate edge widths based on transfer volume
+    edges = G_transfer.edges()
+    weights = [G_transfer[u][v]['weight'] for u, v in edges]
     max_weight = max(weights) if weights else 1
     edge_widths = [3 * w / max_weight for w in weights]
     
-    # Draw network
-    nx.draw_networkx_nodes(G, pos, node_color='lightgreen', 
-                          node_size=node_sizes, alpha=0.9)
-    nx.draw_networkx_labels(G, pos, font_size=8, font_weight='bold')
-    nx.draw_networkx_edges(G, pos, width=edge_widths, alpha=0.5, 
-                          arrows=True, arrowsize=15, edge_color='green',
-                          connectionstyle='arc3,rad=0.1')
+    # 4. Draw transfer network edges using NetworkX
+    nx.draw_networkx_edges(G_transfer, pos, 
+                          width=edge_widths, 
+                          alpha=0.6, 
+                          arrows=True, 
+                          arrowsize=20, 
+                          edge_color='gray',
+                          connectionstyle='arc3,rad=0.15',
+                          ax=ax)
     
-    plt.title(title, fontsize=16, fontweight='bold')
-    plt.axis('off')
+    # 5. Calculate node sizes based on weighted in-degree (transfers received)
+    weighted_in_degree = dict(G_transfer.in_degree(weight='weight'))
+    max_transfers = max(weighted_in_degree.values()) if weighted_in_degree else 1
+    
+    node_sizes = []
+    node_colors_list = []
+    for node in G_transfer.nodes():
+        # Size based on transfer volume
+        transfers = weighted_in_degree.get(node, 0)
+        size = 300 + 1000 * (transfers / max_transfers) if max_transfers > 0 else 500
+        node_sizes.append(size)
+        
+        # Color from hospital_colors dictionary
+        node_colors_list.append(hospital_colors.get(node, 'gray'))
+    
+    # 6. Draw hospital nodes 
+    nx.draw_networkx_nodes(G_transfer, pos,
+                          node_color=node_colors_list,
+                          node_size=node_sizes,
+                          edgecolors='black',
+                          linewidths=2,
+                          alpha=0.9,
+                          ax=ax)
+    
+    # 7. Draw hospital labels
+    labels = {node: node.replace(' Hospital', '') for node in G_transfer.nodes()}
+    nx.draw_networkx_labels(G_transfer, pos,
+                           labels=labels,
+                           font_size=8,
+                           font_weight='bold',
+                           font_color='black',
+                           ax=ax)
+    
+    # 8. Create legend
+    legend_patches = [mpatches.Patch(color=color, label=hospital) 
+                     for hospital, color in hospital_colors.items()]
+    ax.legend(handles=legend_patches, loc='center left', 
+             bbox_to_anchor=(1, 0.5), fontsize=10,
+             title='Hospitals', title_fontsize=11)
+    
+    # 9. Add statistics box
+    total_transfers = sum(weights)
+    stats_text = f"Network Statistics:\n"
+    stats_text += f"Hospitals: {G_transfer.number_of_nodes()}\n"
+    stats_text += f"Connections: {G_transfer.number_of_edges()}\n"
+    stats_text += f"Total Transfers: {int(total_transfers)}"
+    
+    ax.text(0.02, 0.98, stats_text, transform=ax.transAxes,
+           fontsize=10, verticalalignment='top',
+           bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+    
+    # 10. Formatting
+    ax.set_title("North West London Hospital Transfer Network", 
+                fontsize=16, fontweight='bold', pad=20)
+    ax.set_xlabel("Easting (m)", fontsize=12)
+    ax.set_ylabel("Northing (m)", fontsize=12)
+    ax.grid(True, alpha=0.3, linestyle='--')
+    ax.axis('on')
+    
     plt.tight_layout()
-    return plt
+    return fig, ax
+
+
+# Use the function
+print("\nCreating geographic transfer network...")
+fig, ax = plot_transfer_network_on_map(nwl_lsoa, geo_hospital_coords, G_transfer, hospital_colors)
+plt.savefig('nwl_map_with_network.png', dpi=300, bbox_inches='tight')
+plt.show()
+
+
+
 
 def visualize_integrated_network(G, title="Multi-Layered Integrated HIE Network"):
     """Visualize the integrated network with all layers"""

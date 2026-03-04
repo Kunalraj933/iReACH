@@ -563,3 +563,374 @@ visualize_integrated_network(G_integrated)
 plt.savefig('integrated_hie_network.png', dpi=300, bbox_inches='tight')
 plt.show()
 
+############### STEP 2.2: CREATE VULNERABILITY SCORING SYSTEM ###############
+
+def calculate_vulnerability_score(G):
+    """
+    Combine multiple centrality metrics into a single "vulnerability score"
+    Weight each metric based on cyber-propagation risk
+    
+    Returns:
+    --------
+    vulnerability_df : DataFrame with vulnerability scores and classifications
+    """
+    
+    print("\n" + "="*80)
+    print("STEP 2.2: CALCULATING VULNERABILITY SCORES")
+    print("="*80)
+    
+    # Calculate all centrality metrics
+    print("\nCalculating centrality metrics...")
+    
+    # 1. Degree centrality
+    degree_cent = nx.degree_centrality(G)
+    in_degree_cent = nx.in_degree_centrality(G)
+    out_degree_cent = nx.out_degree_centrality(G)
+    
+    # 2. Betweenness centrality (critical choke points)
+    print("  → Betweenness centrality (bridge detection)...")
+    betweenness_cent = nx.betweenness_centrality(G, weight='weight')
+    
+    # 3. Closeness centrality (speed of spread)
+    print("  → Closeness centrality (spread speed)...")
+    closeness_cent = nx.closeness_centrality(G)
+    
+    # 4. Eigenvector centrality (connection to important nodes)
+    print("  → Eigenvector centrality (hub importance)...")
+    try:
+        eigenvector_cent = nx.eigenvector_centrality(G, max_iter=100, weight='weight')
+    except:
+        print("    (Using numpy approximation)")
+        eigenvector_cent = nx.eigenvector_centrality_numpy(G, weight='weight')
+    
+    # 5. PageRank (overall importance)
+    print("  → PageRank (overall importance)...")
+    pagerank = nx.pagerank(G, weight='weight')
+    
+    # 6. Clustering coefficient (local reinforcement)
+    print("  → Clustering coefficient (cascade amplification)...")
+    clustering = nx.clustering(G.to_undirected())
+    
+    # Create DataFrame with all metrics
+    nodes = list(G.nodes())
+    
+    metrics_df = pd.DataFrame({
+        'Hospital': nodes,
+        'Degree_Centrality': [degree_cent[n] for n in nodes],
+        'In_Degree_Centrality': [in_degree_cent[n] for n in nodes],
+        'Out_Degree_Centrality': [out_degree_cent[n] for n in nodes],
+        'Betweenness_Centrality': [betweenness_cent[n] for n in nodes],
+        'Closeness_Centrality': [closeness_cent[n] for n in nodes],
+        'Eigenvector_Centrality': [eigenvector_cent[n] for n in nodes],
+        'PageRank': [pagerank[n] for n in nodes],
+        'Clustering_Coefficient': [clustering[n] for n in nodes]
+    })
+    
+    # Normalize all metrics to 0-1 scale
+    print("\nNormalizing metrics to 0-1 scale...")
+    
+    metrics_to_normalize = [
+        'Degree_Centrality', 'In_Degree_Centrality', 'Out_Degree_Centrality',
+        'Betweenness_Centrality', 'Closeness_Centrality', 'Eigenvector_Centrality',
+        'PageRank', 'Clustering_Coefficient'
+    ]
+    
+    for metric in metrics_to_normalize:
+        max_val = metrics_df[metric].max()
+        min_val = metrics_df[metric].min()
+        if max_val > min_val:
+            metrics_df[f'{metric}_Normalized'] = (
+                (metrics_df[metric] - min_val) / (max_val - min_val)
+            )
+        else:
+            metrics_df[f'{metric}_Normalized'] = 0.5
+    
+    # Calculate weighted vulnerability score
+    print("\nCalculating weighted vulnerability score...")
+    print("  Weights based on cyber-propagation risk:")
+    print("    • Betweenness (critical choke point): 30%")
+    print("    • In-Degree (exposure points): 25%")
+    print("    • Eigenvector (hub connections): 20%")
+    print("    • Closeness (spread speed): 15%")
+    print("    • Clustering (cascade amplification): 10%")
+    
+    # Define weights
+    weights = {
+        'Betweenness_Centrality_Normalized': 0.30,  # High weight - critical bridges
+        'In_Degree_Centrality_Normalized': 0.25,    # High weight - many exposure points
+        'Eigenvector_Centrality_Normalized': 0.20,  # Medium-high - connected to important nodes
+        'Closeness_Centrality_Normalized': 0.15,    # Medium - spread speed
+        'Clustering_Coefficient_Normalized': 0.10   # Lower - local amplification
+    }
+    
+    # Calculate weighted vulnerability score
+    metrics_df['Vulnerability_Score'] = 0
+    for metric, weight in weights.items():
+        metrics_df['Vulnerability_Score'] += metrics_df[metric] * weight
+    
+    # Normalize vulnerability score to 0-100 scale
+    metrics_df['Vulnerability_Score_100'] = metrics_df['Vulnerability_Score'] * 100
+    
+    # Add vulnerability score as node attribute
+    for idx, row in metrics_df.iterrows():
+        G.nodes[row['Hospital']]['vulnerability_score'] = row['Vulnerability_Score']
+        G.nodes[row['Hospital']]['vulnerability_score_100'] = row['Vulnerability_Score_100']
+    
+    # Sort by vulnerability score
+    metrics_df = metrics_df.sort_values('Vulnerability_Score', ascending=False)
+    
+    print("\n✓ Vulnerability scores calculated successfully!")
+    
+    return metrics_df
+
+
+############### STEP 2.3: CLASSIFY NODES BY RISK LEVEL ###############
+
+def classify_vulnerability_tiers(metrics_df):
+    """
+    Classify hospitals into risk tiers based on vulnerability scores
+    
+    Tier 1 (Critical): Top 10-15% vulnerability scores
+    Tier 2 (High): 15-40% vulnerability scores  
+    Tier 3 (Medium): 40-70% vulnerability scores
+    Tier 4 (Low): Bottom 30% vulnerability scores
+    
+    Returns:
+    --------
+    metrics_df : DataFrame with added 'Risk_Tier' column
+    tier_summary : Dictionary with statistics per tier
+    """
+    
+    print("\n" + "="*80)
+    print("STEP 2.3: CLASSIFYING NODES BY RISK LEVEL")
+    print("="*80)
+    
+    # Calculate percentile thresholds
+    n_hospitals = len(metrics_df)
+    
+    # Determine tier boundaries based on rank
+    tier1_threshold = int(np.ceil(n_hospitals * 0.15))  # Top 15%
+    tier2_threshold = int(np.ceil(n_hospitals * 0.40))  # Top 40%
+    tier3_threshold = int(np.ceil(n_hospitals * 0.70))  # Top 70%
+    
+    # Assign tiers
+    metrics_df['Rank'] = range(1, n_hospitals + 1)
+    
+    def assign_tier(rank):
+        if rank <= tier1_threshold:
+            return 'Tier 1 (Critical)'
+        elif rank <= tier2_threshold:
+            return 'Tier 2 (High)'
+        elif rank <= tier3_threshold:
+            return 'Tier 3 (Medium)'
+        else:
+            return 'Tier 4 (Low)'
+    
+    metrics_df['Risk_Tier'] = metrics_df['Rank'].apply(assign_tier)
+    
+    # Create tier summary
+    tier_summary = {}
+    
+    print("\n" + "-"*80)
+    print("RISK TIER CLASSIFICATION RESULTS")
+    print("-"*80)
+    
+    for tier in ['Tier 1 (Critical)', 'Tier 2 (High)', 'Tier 3 (Medium)', 'Tier 4 (Low)']:
+        tier_data = metrics_df[metrics_df['Risk_Tier'] == tier]
+        
+        if len(tier_data) > 0:
+            tier_summary[tier] = {
+                'count': len(tier_data),
+                'hospitals': tier_data['Hospital'].tolist(),
+                'avg_vulnerability': tier_data['Vulnerability_Score_100'].mean(),
+                'min_vulnerability': tier_data['Vulnerability_Score_100'].min(),
+                'max_vulnerability': tier_data['Vulnerability_Score_100'].max()
+            }
+            
+            # Print tier information
+            if tier == 'Tier 1 (Critical)':
+                emoji = "🔴"
+                description = "HIGHEST cascade risk - Priority defense targets"
+            elif tier == 'Tier 2 (High)':
+                emoji = "🟠"
+                description = "HIGH cascade risk - Important defense targets"
+            elif tier == 'Tier 3 (Medium)':
+                emoji = "🟡"
+                description = "MODERATE cascade risk - Secondary defense targets"
+            else:
+                emoji = "🟢"
+                description = "LOW cascade risk - Tertiary defense targets"
+            
+            print(f"\n{emoji} {tier}")
+            print(f"   {description}")
+            print(f"   Count: {len(tier_data)} hospitals")
+            print(f"   Vulnerability Range: {tier_data['Vulnerability_Score_100'].min():.1f} - {tier_data['Vulnerability_Score_100'].max():.1f}")
+            print(f"   Hospitals:")
+            for idx, row in tier_data.iterrows():
+                print(f"      • {row['Hospital']:<40} (Score: {row['Vulnerability_Score_100']:.1f})")
+    
+    print("\n" + "-"*80)
+    
+    # Print key statistics
+    print("\nKEY STATISTICS:")
+    print(f"  Total hospitals analyzed: {n_hospitals}")
+    print(f"  Critical tier (Tier 1): {tier1_threshold} hospitals ({tier1_threshold/n_hospitals*100:.1f}%)")
+    print(f"  High tier (Tier 2): {tier2_threshold - tier1_threshold} hospitals")
+    print(f"  Medium tier (Tier 3): {tier3_threshold - tier2_threshold} hospitals")
+    print(f"  Low tier (Tier 4): {n_hospitals - tier3_threshold} hospitals")
+    
+    print("\n" + "="*80)
+    
+    return metrics_df, tier_summary
+
+
+############### VISUALIZATION: VULNERABILITY SCORE DASHBOARD ###############
+
+def visualize_vulnerability_scores(metrics_df):
+    """
+    Create comprehensive visualization of vulnerability scores
+    """
+    
+    fig, axes = plt.subplots(2, 2, figsize=(18, 14))
+    
+    # Color scheme for tiers
+    tier_colors = {
+        'Tier 1 (Critical)': '#d32f2f',  # Dark red
+        'Tier 2 (High)': '#ff6f00',      # Orange
+        'Tier 3 (Medium)': '#fbc02d',    # Yellow
+        'Tier 4 (Low)': '#689f38'        # Green
+    }
+    
+    # 1. Horizontal bar chart of vulnerability scores
+    ax1 = axes[0, 0]
+    
+    colors = [tier_colors[tier] for tier in metrics_df['Risk_Tier']]
+    
+    y_pos = np.arange(len(metrics_df))
+    ax1.barh(y_pos, metrics_df['Vulnerability_Score_100'], 
+            color=colors, edgecolor='black', linewidth=1)
+    ax1.set_yticks(y_pos)
+    ax1.set_yticklabels([h.replace(' Hospital', '') for h in metrics_df['Hospital']], 
+                        fontsize=9)
+    ax1.set_xlabel('Vulnerability Score (0-100)', fontsize=11, fontweight='bold')
+    ax1.set_title('Hospital Vulnerability Ranking', fontsize=13, fontweight='bold')
+    ax1.grid(True, axis='x', alpha=0.3)
+    ax1.invert_yaxis()
+    
+    # Add tier labels
+    for tier, color in tier_colors.items():
+        ax1.plot([], [], 's', color=color, label=tier, markersize=10)
+    ax1.legend(loc='lower right', fontsize=9)
+    
+    # 2. Vulnerability score distribution
+    ax2 = axes[0, 1]
+    
+    for tier in ['Tier 1 (Critical)', 'Tier 2 (High)', 'Tier 3 (Medium)', 'Tier 4 (Low)']:
+        tier_data = metrics_df[metrics_df['Risk_Tier'] == tier]['Vulnerability_Score_100']
+        if len(tier_data) > 0:
+            ax2.hist(tier_data, bins=10, alpha=0.6, 
+                    color=tier_colors[tier], label=tier, edgecolor='black')
+    
+    ax2.set_xlabel('Vulnerability Score', fontsize=11, fontweight='bold')
+    ax2.set_ylabel('Number of Hospitals', fontsize=11, fontweight='bold')
+    ax2.set_title('Vulnerability Score Distribution', fontsize=13, fontweight='bold')
+    ax2.legend(fontsize=9)
+    ax2.grid(True, alpha=0.3)
+    
+    # 3. Centrality metrics heatmap (top 10 hospitals)
+    ax3 = axes[1, 0]
+    
+    top_10 = metrics_df.head(10)
+    
+    heatmap_metrics = [
+        'Betweenness_Centrality_Normalized',
+        'In_Degree_Centrality_Normalized',
+        'Eigenvector_Centrality_Normalized',
+        'Closeness_Centrality_Normalized',
+        'Clustering_Coefficient_Normalized'
+    ]
+    
+    heatmap_data = top_10[heatmap_metrics].values
+    
+    im = ax3.imshow(heatmap_data, cmap='YlOrRd', aspect='auto', vmin=0, vmax=1)
+    
+    # Set ticks
+    ax3.set_xticks(np.arange(len(heatmap_metrics)))
+    ax3.set_yticks(np.arange(len(top_10)))
+    ax3.set_xticklabels(['Betweenness', 'In-Degree', 'Eigenvector', 
+                        'Closeness', 'Clustering'], 
+                       rotation=45, ha='right', fontsize=9)
+    ax3.set_yticklabels([h.replace(' Hospital', '') for h in top_10['Hospital']], 
+                       fontsize=9)
+    
+    # Add values in cells
+    for i in range(len(top_10)):
+        for j in range(len(heatmap_metrics)):
+            text = ax3.text(j, i, f'{heatmap_data[i, j]:.2f}',
+                          ha="center", va="center", color="black", fontsize=8)
+    
+    ax3.set_title('Top 10 Hospitals: Centrality Metrics Heatmap', 
+                 fontsize=13, fontweight='bold')
+    plt.colorbar(im, ax=ax3, label='Normalized Score')
+    
+    # 4. Pie chart of tier distribution
+    ax4 = axes[1, 1]
+    
+    tier_counts = metrics_df['Risk_Tier'].value_counts()
+    colors_pie = [tier_colors[tier] for tier in tier_counts.index]
+    
+    wedges, texts, autotexts = ax4.pie(tier_counts.values, 
+                                        labels=tier_counts.index,
+                                        colors=colors_pie,
+                                        autopct='%1.1f%%',
+                                        startangle=90,
+                                        textprops={'fontsize': 10})
+    
+    # Make percentage text bold
+    for autotext in autotexts:
+        autotext.set_color('white')
+        autotext.set_fontweight('bold')
+        autotext.set_fontsize(11)
+    
+    ax4.set_title('Risk Tier Distribution', fontsize=13, fontweight='bold')
+    
+    plt.tight_layout()
+    return fig
+
+
+############### RUN THE ANALYSIS ###############
+
+# Step 2.2: Calculate vulnerability scores
+vulnerability_df = calculate_vulnerability_score(G_transfer)
+
+# Step 2.3: Classify by risk tiers
+vulnerability_df, tier_summary = classify_vulnerability_tiers(vulnerability_df)
+
+# Display top 10 most vulnerable hospitals
+print("\n" + "="*80)
+print("TOP 10 MOST VULNERABLE HOSPITALS")
+print("="*80)
+print(vulnerability_df[['Hospital', 'Vulnerability_Score_100', 'Risk_Tier', 
+                        'Betweenness_Centrality', 'In_Degree_Centrality', 
+                        'Eigenvector_Centrality']].head(10).to_string(index=False))
+
+# Create visualization
+print("\nGenerating vulnerability score visualizations...")
+fig_vulnerability = visualize_vulnerability_scores(vulnerability_df)
+plt.savefig('vulnerability_scores_analysis.png', dpi=300, bbox_inches='tight')
+plt.show()
+
+# Save results to CSV
+vulnerability_df.to_csv('hospital_vulnerability_scores.csv', index=False)
+print("\n✓ Results saved to 'hospital_vulnerability_scores.csv'")
+
+# Print summary statistics
+print("\n" + "="*80)
+print("SUMMARY STATISTICS")
+print("="*80)
+print(f"Mean vulnerability score: {vulnerability_df['Vulnerability_Score_100'].mean():.2f}")
+print(f"Median vulnerability score: {vulnerability_df['Vulnerability_Score_100'].median():.2f}")
+print(f"Std deviation: {vulnerability_df['Vulnerability_Score_100'].std():.2f}")
+print(f"Range: {vulnerability_df['Vulnerability_Score_100'].min():.2f} - {vulnerability_df['Vulnerability_Score_100'].max():.2f}")
+print("="*80)
+

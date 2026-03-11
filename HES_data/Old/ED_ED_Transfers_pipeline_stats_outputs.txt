@@ -1,0 +1,705 @@
+# Databricks notebook source
+# DBTITLE 1,DROP FUNCTION
+# MAGIC %sql
+# MAGIC drop table dsa_778927_p3d9z.dsa_778927_p3d9z_collab.ed_ed3
+
+# COMMAND ----------
+
+# DBTITLE 1,OUTGOING ED TRANSFERS
+from pyspark.sql.functions import col
+
+ecds_df = spark.table('dsa_778927_p3d9z.dars_nic_778927_p3d9z.ecds_dars_nic_778927_p3d9z')
+
+out_ed1 = ecds_df.filter(
+    (col("DISCHARGE_DESTINATION").isin("19712007")) &
+    (col("DEPARTMENT_TYPE") == "01")
+    )
+
+out_ed2 = out_ed1.select(
+    "PERSON_ID_DEID",
+    "DISCHARGE_DESTINATION",
+    "SITE",
+    "DEPARTURE_DATE",
+    "DEPARTURE_TIME",
+    "FYEAR",
+    "DISCHARGE_DESTINATION",
+    "DISCHARGE_FOLLOW_UP",
+    "STATED_GENDER",
+    "AGE_AT_ARRIVAL"
+)
+out_ed2 = out_ed2.withColumnRenamed("SITE", "out_SITE")
+display(out_ed2)
+
+out_ed2.select(col("PERSON_ID_DEID")).count()
+
+# COMMAND ----------
+
+# DBTITLE 1,INCOMING ED TRANSFERS
+ecds_df = spark.table('dsa_778927_p3d9z.dars_nic_778927_p3d9z.ecds_dars_nic_778927_p3d9z')
+
+in_ed1 = ecds_df.filter(
+    (col("ATTENDANCE_SOURCE").isin("1066431000000102", "1066441000000106")) &
+    (col("DEPARTMENT_TYPE") == "01")
+    )
+
+in_ed2 = in_ed1.select(
+    "PERSON_ID_DEID",
+    "ATTENDANCE_SOURCE",
+    "SITE",
+    "ARRIVAL_MODE",
+    "ARRIVAL_DATE",
+    "ARRIVAL_TIME"
+)
+
+in_ed2 = in_ed2.withColumnRenamed("PERSON_ID_DEID", "in_PERSON_ID")
+in_ed2 = in_ed2.withColumnRenamed("SITE", "in_SITE")
+
+display(in_ed2)
+in_ed2.select(col("in_PERSON_ID")).count()
+
+
+
+# COMMAND ----------
+
+# DBTITLE 1,ed_ed2: JOIN out_ed2 and in_ed2 TRANSFERS
+from pyspark.sql import functions as F
+from pyspark.sql.window import Window
+
+# Join tables where PERSON_ID_DEID matches but SITE is different
+ed_ed2 = out_ed2.alias('out').join(
+    in_ed2.alias('in'),
+    (F.col('out.PERSON_ID_DEID') == F.col('in_PERSON_ID')) &
+    (F.col('out_SITE') != F.col('in_SITE')) &
+    (F.col('in.arrival_date') >= F.col('out.departure_date')),  # arrival after or same day as departure
+    'inner'
+)
+
+# Create a window to rank arrivals by date for each departure
+window_spec = Window.partitionBy(
+    'out.PERSON_ID_DEID', 
+    'out.departure_date', 
+    'out.departure_time'
+).orderBy('in.arrival_date', 'in.arrival_time')
+
+# Add row number - 1 = closest arrival
+ed_ed2 = ed_ed2.withColumn('row_num', F.row_number().over(window_spec))
+
+# Keep only the first (closest) arrival
+ed_ed2 = ed_ed2.filter(F.col('row_num') == 1)
+ed_ed2 = ed_ed2.drop("in_PERSON_ID").drop("DISCHARGE_DESTINATION")
+
+# Display preview
+display(ed_ed2.limit(10))
+ed_ed2.select(col("PERSON_ID_DEID")).count()
+
+# COMMAND ----------
+
+# DBTITLE 1,<=24hr transfer time restriction
+from pyspark.sql import functions as F
+from pyspark.sql.functions import col
+
+# Step 1: Create datetime columns by combining date and time
+ed_ed2 = ed_ed2.withColumn(
+    'departure_datetime',
+    F.to_timestamp(
+        F.concat(
+            F.col('departure_date'),
+            F.lit(' '),
+            F.date_format(F.col('departure_time'), 'HH:mm:ss')
+        ),
+        'yyyy-MM-dd HH:mm:ss'
+    )
+).withColumn(
+    'arrival_datetime',
+    F.to_timestamp(
+        F.concat(
+            F.col('arrival_date'),
+            F.lit(' '),
+            F.date_format(F.col('arrival_time'), 'HH:mm:ss')
+        ),
+        'yyyy-MM-dd HH:mm:ss'
+    )
+)
+
+
+# Step 2: Calculate transfer duration in minutes
+ed_ed2 = ed_ed2.withColumn(
+    'transfer_duration_mins',
+    (F.unix_timestamp('arrival_datetime') - F.unix_timestamp('departure_datetime')) / 60
+)
+
+# Filter to realistic transfer times
+# Most ED-to-ED transfers should be < 24 hours, cap at 48 hours to be safe
+ed_ed2 = ed_ed2.filter(
+    col("transfer_duration_mins").isNotNull() &
+    (col("transfer_duration_mins") > 0) &
+    (F.col('transfer_duration_mins') <= 1440) # Less than 24 hours (1440 minutes)
+)
+
+
+ed_ed2.write.mode("overwrite").saveAsTable("dsa_778927_p3d9z.dsa_778927_p3d9z_collab.ed_ed2")
+
+
+# COMMAND ----------
+
+# DBTITLE 1,Descriptive stats
+
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
+import numpy as np
+import sqlite3
+from pyspark.sql.functions import percentile_approx
+from pyspark.sql import functions as F
+from pyspark.sql.functions import col
+
+ed_ed2 = spark.table("dsa_778927_p3d9z.dsa_778927_p3d9z_collab.ed_ed2")
+
+# Step 3: Calculate 95th percentile
+percentiles = ed_ed2.select(
+    F.expr('percentile_approx(transfer_duration_mins, 0.95)').alias('p95_mins'),
+    F.expr('percentile_approx(transfer_duration_mins, 0.50)').alias('median_mins'),
+    F.min('transfer_duration_mins').alias('min_mins'),
+    F.max('transfer_duration_mins').alias('max_mins'),
+    F.avg('transfer_duration_mins').alias('avg_mins'),
+    F.stddev('transfer_duration_mins').alias('std_dev_mins')
+).collect()[0]
+
+# Display results
+print("="*50)
+print("TRANSFER DURATION STATISTICS")
+print("="*50)
+print(f"95th Percentile: {percentiles['p95_mins']:.1f} minutes ({percentiles['p95_mins']/60:.1f} hours)")
+print(f"Median:          {percentiles['median_mins']:.1f} minutes ({percentiles['median_mins']/60:.1f} hours)")
+print(f"Standard Deviation: {percentiles['std_dev_mins']:.1f} minutes")
+print(f"Average:         {percentiles['avg_mins']:.1f} minutes ({percentiles['avg_mins']/60:.1f} hours)")
+print(f"Minimum:         {percentiles['min_mins']:.1f} minutes")
+print(f"Maximum:         {percentiles['max_mins']:.1f} minutes")
+print("="*50)
+print(f"\n✓ 95% of patients are transferred within {percentiles['p95_mins']:.0f} minutes ({percentiles['p95_mins']/60:.1f} hours)")
+
+# Show sample of data with new columns
+ed_ed2.select(
+    'PERSON_ID_DEID', 
+    'out_SITE', 
+    'in_SITE',
+    'departure_datetime', 
+    'arrival_datetime', 
+    'transfer_duration_mins'
+).show(10, truncate=False)
+
+
+import matplotlib.pyplot as plt
+import pandas as pd
+from pyspark.sql import functions as F
+
+# Convert to pandas for plotting
+df_pandas = ed_ed2.select(
+    'transfer_duration_mins',
+    (F.col('transfer_duration_mins') / 60).alias('transfer_duration_hours'),
+    (F.col('transfer_duration_mins') / 60 / 24).alias('transfer_duration_days')
+).toPandas()
+
+# Create bins for different time ranges
+fig, axes = plt.subplots(3, 1, figsize=(10, 12))
+
+# Plot 1: Distribution in hours (0-24 hours)
+ax1 = axes[0]
+df_under_24h = df_pandas[df_pandas['transfer_duration_hours'] <= 24]
+ax1.hist(df_under_24h['transfer_duration_hours'], bins=48, color='steelblue', edgecolor='white')
+ax1.set_xlabel('Transfer Duration (hours)', fontsize=12)
+ax1.set_ylabel('Number of Transfers', fontsize=12)
+ax1.set_title(f'Transfer Duration Distribution (0-24 hours)\nn={len(df_under_24h)}', fontsize=13, fontweight='bold')
+ax1.axvline(df_under_24h['transfer_duration_hours'].median(), color='red', linestyle='--', linewidth=2, label='median')
+ax1.legend()
+ax1.grid(True, alpha=0.3)
+
+
+# Plot 2: Full distribution (all data) - log scale
+ax2 = axes[1]
+ax2.hist(df_pandas['transfer_duration_hours'], bins=100, color='darkgreen', edgecolor='white')
+ax2.set_xlabel('Transfer Duration (hours)', fontsize=12)
+ax2.set_ylabel('Number of Transfers (log scale)', fontsize=12)
+ax2.set_title(f'Full Distribution - All Data\nn={len(df_pandas)}', fontsize=13, fontweight='bold')
+ax2.set_yscale('log')
+ax2.grid(True, alpha=0.3)
+
+# Plot 3: Categorized bar chart
+ax3 = axes[2]
+bins = [0, 2, 6, 12, 24]  # 0-2h, 2-6h, 6-12h, 12-24h
+labels = ['0-2h', '2-6h', '6-12h', '12-24h']
+df_pandas['category'] = pd.cut(df_pandas['transfer_duration_hours'], bins=bins, labels=labels)
+category_counts = df_pandas['category'].value_counts().sort_index()
+
+category_counts.plot(kind='bar', ax=ax3, color='teal', edgecolor='white')
+ax3.set_xlabel('Transfer Duration Category', fontsize=12)
+ax3.set_ylabel('Number of Transfers', fontsize=12)
+ax3.set_title('Transfer Duration by Category', fontsize=13, fontweight='bold')
+ax3.tick_params(axis='x', rotation=45)
+ax3.grid(True, alpha=0.3, axis='y')
+
+# Add counts on bars
+for i, v in enumerate(category_counts):
+    ax3.text(i, v + 5, str(v), ha='center', va='bottom', fontsize=10)
+
+plt.tight_layout()
+plt.show()
+
+# Print summary statistics
+print("\n" + "="*60)
+print("TRANSFER DURATION SUMMARY")
+print("="*60)
+print(f"Total transfers: {len(df_pandas):,}")
+print(f"\nPercentiles (in hours):")
+print(f"  25th: {df_pandas['transfer_duration_hours'].quantile(0.25):.1f} hours")
+print(f"  50th: {df_pandas['transfer_duration_hours'].quantile(0.50):.1f} hours")
+print(f"  75th: {df_pandas['transfer_duration_hours'].quantile(0.75):.1f} hours")
+print(f"  95th: {df_pandas['transfer_duration_hours'].quantile(0.95):.1f} hours")
+print(f"  99th: {df_pandas['transfer_duration_hours'].quantile(0.99):.1f} hours")
+print(f"\nMin: {df_pandas['transfer_duration_hours'].min():.1f} hours")
+print(f"Max: {df_pandas['transfer_duration_hours'].max():.1f} hours")
+print(f"\nCategory breakdown:")
+print(category_counts)
+print("="*60)
+
+
+# COMMAND ----------
+
+# DBTITLE 1,Unique hospital/patient counts
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
+import numpy as np
+import sqlite3
+from pyspark.sql.functions import percentile_approx
+
+# --- load data ---
+ed_ed2 = spark.table("dsa_778927_p3d9z.dsa_778927_p3d9z_collab.ed_ed2").toPandas()
+
+# Count unique OUTGOING HOSPITALS
+unique_out_hospitals = ed_ed2['out_SITE'].nunique()
+print(f"Number of unique outgoing/transferring hospitals: {unique_out_hospitals}")
+
+# Count unique hospitals incoming hospitals
+unique_in_hospitals = ed_ed2['in_SITE'].nunique()
+print(f"Number of unique receiving/incoming hospitals: {unique_in_hospitals}")
+
+# Combine both columns and count unique values
+unique_hospitals_total = pd.concat([ed_ed2['out_SITE'], ed_ed2['in_SITE']]).nunique()
+print(f"Total unique hospitals across both columns: {unique_hospitals_total}")
+
+# Count unique patients in PERSON_ID_DEID
+unique_patients = ed_ed2['PERSON_ID_DEID'].nunique()
+print(f"Total unique patients: {unique_patients}")
+
+# COMMAND ----------
+
+# DBTITLE 1,ed_ed3: Merging hospital codes with names
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
+import numpy as np
+import sqlite3
+from pyspark.sql.functions import percentile_approx
+
+# Load the org_daily table
+org_daily = spark.table('reference_data.dss_corporate.org_daily').toPandas()
+ed_ed2 = spark.table("dsa_778927_p3d9z.dsa_778927_p3d9z_collab.ed_ed2").toPandas()
+
+# Merge to add hospital names for out_ed_site
+ed_ed2 = ed_ed2.merge(
+    org_daily[['ORG_CODE', 'NAME']],
+    left_on='out_SITE',
+    right_on='ORG_CODE',
+    how='left'
+)
+
+# Rename the column to be clearer
+ed_ed2 = ed_ed2.rename(
+    columns={'NAME': 'out_ed_hospital_name'}
+)
+
+# Add hospital names for in_ed_site too
+ed_ed2 = ed_ed2.merge(
+    org_daily[['ORG_CODE', 'NAME']],
+    left_on='in_SITE',
+    right_on='ORG_CODE',
+    how='left'
+)
+
+# Rename and clean up
+ed_ed2 = ed_ed2.rename(
+    columns={'NAME': 'in_ed_hospital_name'}
+)
+
+print(ed_ed2[['out_SITE', 'out_ed_hospital_name', 'in_SITE', 'in_ed_hospital_name']].head())
+
+# Drop the org_code column if you don't need it
+spark_ed_ed2 = spark.createDataFrame(ed_ed2)
+spark_ed_ed2.write.mode("overwrite").saveAsTable("dsa_778927_p3d9z.dsa_778927_p3d9z_collab.ed_ed3")
+
+# COMMAND ----------
+
+# DBTITLE 1,Normalised Net Balance
+import matplotlib.pyplot as plt
+import seaborn as sns
+import pandas as pd
+import numpy as np
+
+ed_ed3 = spark.table("dsa_778927_p3d9z.dsa_778927_p3d9z_collab.ed_ed3").toPandas()
+
+
+"""Transfer Balance Analysis
+Are hospitals net senders or net receivers?
+Questions answered:
+
+Is RQM01 predominantly sending or receiving?
+Which hospitals act as specialist receiving centres?
+Which hospitals are redistribution hubs?"""
+
+# Sent vs Received per hospital
+sent = ed_ed3.groupby('out_ed_hospital_name').size().reset_index(name='sent')
+received = ed_ed3.groupby('in_ed_hospital_name').size().reset_index(name='received')
+
+# Merge
+balance = sent.merge(received, 
+                     left_on='out_ed_hospital_name', 
+                     right_on='in_ed_hospital_name')
+
+balance['total_activity'] = balance['sent'] + balance['received']
+
+balance['normalised_net'] = (
+    (balance['sent'] - balance['received']) /
+    balance['total_activity']
+)
+
+
+"""Visual: Net Transfer Balance"""
+
+balance_sorted = balance.sort_values('normalised_net')
+
+colors = [
+    '#E63946' if x > 0.1 else
+    '#2A9D8F' if x < -0.1 else
+    '#BDBDBD'
+    for x in balance_sorted['normalised_net']]
+
+fig_height = len(balance_sorted) * 0.15
+fig, ax = plt.subplots(figsize=(10, fig_height))
+bars = ax.barh(balance_sorted['out_ed_hospital_name'], balance_sorted['normalised_net'], color=colors, height=0.5)
+
+ax.axvline(x=0, color='white', linewidth=1.5)
+ax.set_title('Hospital Transfer Balance\n(Positive = Net Sender | Negative = Net Receiver)', 
+             fontsize=12, fontweight='bold')
+ax.set_xlabel('Normalised Net Transfer Balance\n'
+              '(+1 = Only Sending | 0 = Balanced | −1 = Only Receiving)', fontsize=10)
+ax.set_ylabel('Hospital', fontsize=12)
+ax.grid(True, alpha=0.3, axis='x')
+ax.tick_params(axis='y', labelsize=6)  
+
+# Add value labels
+for bar, val in zip(bars, balance_sorted['normalised_net']):
+    ax.text(
+        val + (0.02 if val >= 0 else -0.02),
+        bar.get_y() + bar.get_height()/2,
+        f"{val:.2f}",
+        va='center',
+        ha='left' if val >= 0 else 'right',
+        fontsize=6)
+
+# Add legend
+from matplotlib.patches import Patch
+legend_elements = [Patch(facecolor='#E63946', label='Net Sender'),
+                   Patch(facecolor='#2A9D8F', label='Net Receiver')]
+ax.legend(handles=legend_elements)
+plt.tight_layout()
+plt.show()
+
+# COMMAND ----------
+
+# DBTITLE 1,Month on Month ED transfers
+import pandas as pd
+import matplotlib.pyplot as plt
+import numpy as np
+from sklearn.linear_model import LinearRegression
+
+ed_ed3 = spark.table("dsa_778927_p3d9z.dsa_778927_p3d9z_collab.ed_ed3").toPandas()
+
+# Convert DEPARTURE_DATE to datetime
+ed_ed3['DEPARTURE_DATE'] = pd.to_datetime(
+    ed_ed3['DEPARTURE_DATE'], 
+    errors='coerce'
+)
+
+# Extract year-month
+ed_ed3['year_month'] = ed_ed3['DEPARTURE_DATE'].dt.to_period('M')
+
+# Count transfers per month
+monthly_transfers = ed_ed3.groupby('year_month').size().reset_index(name='transfer_count')
+
+# Convert period back to timestamp for plotting
+monthly_transfers['year_month'] = monthly_transfers['year_month'].dt.to_timestamp()
+
+# Prepare data for linear regression
+monthly_transfers['month_number'] = range(len(monthly_transfers))
+X = monthly_transfers[['month_number']].values
+y = monthly_transfers['transfer_count'].values
+
+# Fit linear regression
+model = LinearRegression()
+model.fit(X, y)
+y_pred = model.predict(X)
+
+# Calculate R-squared
+r_squared = model.score(X, y)
+slope = model.coef_[0]
+intercept = model.intercept_
+
+# Plot
+fig, ax = plt.subplots(figsize=(14, 6))
+
+# Actual data
+ax.plot(monthly_transfers['year_month'], monthly_transfers['transfer_count'], 
+        marker='o', linewidth=2, markersize=6, color='steelblue', label='Actual Transfers')
+
+# Regression line
+ax.plot(monthly_transfers['year_month'], y_pred, 
+        linestyle='--', linewidth=2, color='red', label='Linear Trend')
+
+ax.set_xlabel('Month', fontsize=12)
+ax.set_ylabel('Number of Transfers', fontsize=12)
+ax.set_title('ED to ED Transfer Volumes - Month on Month with Linear Trend', fontsize=14, fontweight='bold')
+ax.grid(True, alpha=0.3)
+ax.legend(fontsize=11, loc='upper left')
+
+# Add text box with statistics
+textstr = f'Slope: {slope:+.2f} transfers/month\nIntercept: {intercept:.2f}\nR² = {r_squared:.3f}'
+props = dict(boxstyle='round', facecolor='wheat', alpha=0.8)
+ax.text(0.98, 0.02, textstr, transform=ax.transAxes, fontsize=11,
+        verticalalignment='bottom', horizontalalignment='right', bbox=props)
+
+# Format x-axis
+import matplotlib.dates as mdates
+ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %Y'))
+ax.xaxis.set_major_locator(mdates.MonthLocator(interval=1))
+plt.xticks(rotation=45, ha='right')
+
+plt.tight_layout()
+plt.show()
+
+# Print summary
+print(f"\n--- Linear Regression Results ---")
+print(f"Slope: {slope:.2f} transfers per month")
+print(f"Intercept: {intercept:.2f}")
+print(f"R-squared: {r_squared:.3f}")
+
+if slope > 0:
+    print(f"\n📈 Transfer volumes are INCREASING by {slope:.2f} transfers per month on average")
+else:
+    print(f"\n📉 Transfer volumes are DECREASING by {abs(slope):.2f} transfers per month on average")
+
+# COMMAND ----------
+
+# DBTITLE 1,Network Graph ED_ED
+import pandas as pd
+import numpy as np
+import networkx as nx
+import matplotlib.pyplot as plt
+from datetime import datetime, timedelta
+import seaborn as sns
+import pandas as pd
+import numpy as np
+import matplotlib.patches as mpatches
+
+transfer_data = spark.table("dsa_778927_p3d9z.dsa_778927_p3d9z_collab.ed_ed3").toPandas()
+
+# Step 1: Transfer Network
+def build_transfer_network(transfer_data):
+    """
+    Build directed, weighted network from patient transfer data
+    Nodes: Hospitals (sized by in-degree centrality)
+    Edges: Weighted by number of transfers (origin -> destination)
+    """
+    transfer_data = transfer_data.dropna(subset=['out_ed_hospital_name', 'in_ed_hospital_name'])
+
+    G = nx.DiGraph()
+    
+    # Add all hospitals as nodes
+    G.add_nodes_from(transfer_data['out_ed_hospital_name'].unique())
+    G.add_nodes_from(transfer_data['in_ed_hospital_name'].unique())
+    
+    # Count transfers between hospital pairs
+    transfer_counts = transfer_data.groupby(
+        ['out_ed_hospital_name', 'in_ed_hospital_name']
+    ).size().reset_index(name='weight')
+    
+    # Add weighted edges
+    for _, row in transfer_counts.iterrows():
+        G.add_edge(
+            row['out_ed_hospital_name'],
+            row['in_ed_hospital_name'],
+            weight=row['weight'],
+            edge_type='transfer'
+        )
+    
+    # Calculate in-degree centrality (transfers received)
+    in_degree_centrality = nx.in_degree_centrality(G)
+    
+    # Add node attributes for size based on in-degree centrality
+    for node in G.nodes():
+        G.nodes[node]['in_degree_centrality'] = in_degree_centrality[node]
+        # Scale the size for visualization (multiply by a factor for visibility)
+        G.nodes[node]['node_size'] = in_degree_centrality[node] * 500 + 10  # Min size of 100
+    
+    return G
+
+G = build_transfer_network(transfer_data)
+print("LAYER 1: Transfer Network")
+print(f"Nodes: {G.number_of_nodes()}")
+print(f"Edges: {G.number_of_edges()}")
+print(f"Average degree: {sum(dict(G.degree()).values()) / G.number_of_nodes():.2f}")
+
+# Display top hospitals by transfers received
+in_degrees = dict(G.in_degree())
+top_receivers = sorted(in_degrees.items(), key=lambda x: x[1], reverse=True)[:10]
+print("\nTop 10 hospitals by transfers received:")
+for hospital, count in top_receivers:
+    print(f"  {hospital}: {count} transfers (centrality: {G.nodes[hospital]['in_degree_centrality']:.4f})")
+
+
+
+
+############ VISUALISATION OF DEGREE CENTRALITY ################
+def plot_transfer_network(G, top_n=None, min_transfers=1, figsize=(16, 12)):
+    """
+    Visualize the directed hospital transfer network.
+    
+    Parameters:
+        G          : DiGraph from build_transfer_network()
+        top_n      : If set, only show top N hospitals by in-degree centrality
+        min_transfers : Filter edges below this transfer count
+        figsize    : Figure size tuple
+    """
+    # --- Filter to top_n hospitals if specified ---
+    if top_n:
+        top_nodes = sorted(
+            G.nodes(), 
+            key=lambda n: G.nodes[n]['in_degree_centrality'], 
+            reverse=True
+        )[:top_n]
+        G = G.subgraph(top_nodes).copy()
+
+    # --- Filter edges by minimum transfer weight ---
+    edges_to_remove = [
+        (u, v) for u, v, d in G.edges(data=True) if d['weight'] < min_transfers
+    ]
+    G.remove_edges_from(edges_to_remove)
+    # Remove isolated nodes after edge filtering
+    G.remove_nodes_from(list(nx.isolates(G)))
+
+    if G.number_of_nodes() == 0:
+        print("No nodes remain after filtering. Lower min_transfers or increase top_n.")
+        return
+
+    # --- Layout ---
+    pos = nx.spring_layout(G, k=2.5, seed=42, weight='weight')
+
+    # --- Node sizing and coloring by in-degree centrality ---
+    node_sizes = [G.nodes[n]['node_size'] for n in G.nodes()]
+    in_centrality = [G.nodes[n]['in_degree_centrality'] for n in G.nodes()]
+
+    # --- Edge widths and alpha scaled by weight ---
+    weights = np.array([d['weight'] for _, _, d in G.edges(data=True)], dtype=float)
+    if weights.max() > 0:
+        norm_weights = weights / weights.max()
+    else:
+        norm_weights = weights
+
+    edge_widths = norm_weights * 5 + 0.5       # range ~0.5–5.5
+    edge_alphas = norm_weights * 0.7 + 0.15    # range ~0.15–0.85
+
+    # --- Plot ---
+    fig, ax = plt.subplots(figsize=figsize, facecolor='#0f1117')
+    ax.set_facecolor('#0f1117')
+
+    # Draw edges individually to support per-edge alpha
+    for i, (u, v, data) in enumerate(G.edges(data=True)):
+        nx.draw_networkx_edges(
+            G, pos,
+            edgelist=[(u, v)],
+            width=edge_widths[i],
+            alpha=float(edge_alphas[i]),
+            edge_color='#4fc3f7',
+            arrows=True,
+            arrowstyle='-|>',
+            arrowsize=15,
+            connectionstyle='arc3,rad=0.1',
+            ax=ax
+        )
+
+    # Draw nodes
+    sc = nx.draw_networkx_nodes(
+        G, pos,
+        node_size=node_sizes,
+        node_color=in_centrality,
+        cmap=plt.cm.YlOrRd,
+        alpha=0.92,
+        ax=ax
+    )
+
+    # Labels — only label nodes for top 10 receivers to reduce clutter
+    top_10 = set(
+        sorted(G.nodes(), key=lambda n: G.nodes[n]['in_degree_centrality'], reverse=True)[:10]
+    )
+    label_nodes = {n: n for n in G.nodes() if n in top_10}
+    nx.draw_networkx_labels(
+        G, pos,
+        labels=label_nodes,
+        font_size=7,
+        font_color='white',
+        font_weight='bold',
+        ax=ax
+    )
+
+    # Colorbar
+    sm = plt.cm.ScalarMappable(
+        cmap=plt.cm.YlOrRd,
+        norm=plt.Normalize(vmin=min(in_centrality), vmax=max(in_centrality))
+    )
+    sm.set_array([])
+    cbar = plt.colorbar(sm, ax=ax, shrink=0.6, pad=0.02)
+    cbar.set_label('In-Degree Centrality\n(transfers received)', color='white', fontsize=10)
+    cbar.ax.yaxis.set_tick_params(color='white')
+    plt.setp(cbar.ax.yaxis.get_ticklabels(), color='white')
+
+    # Legend for edge weight
+    legend_elements = [
+        mpatches.Patch(facecolor='#4fc3f7', alpha=0.3, label='Low transfer volume'),
+        mpatches.Patch(facecolor='#4fc3f7', alpha=0.85, label='High transfer volume'),
+    ]
+    ax.legend(handles=legend_elements, loc='lower left', 
+              facecolor='#1e2130', edgecolor='gray', labelcolor='white', fontsize=9)
+
+    # Title and cleanup
+    title = f"Hospital Transfer Network"
+    if top_n:
+        title += f" (Top {top_n} hospitals)"
+    if min_transfers > 1:
+        title += f" [min {min_transfers} transfers/edge]"
+    
+    ax.set_title(title, color='white', fontsize=15, fontweight='bold', pad=15)
+    ax.axis('off')
+    plt.tight_layout()
+    plt.savefig('transfer_network.png', dpi=150, bbox_inches='tight', facecolor='#0f1117')
+    plt.show()
+    print("Saved to transfer_network.png")
+
+
+# --- Run ---
+G_transfer = build_transfer_network(transfer_data)
+
+print(f"Nodes: {G_transfer.number_of_nodes()}")
+print(f"Edges: {G_transfer.number_of_edges()}")
+
+# Full network
+plot_transfer_network(G_transfer)
